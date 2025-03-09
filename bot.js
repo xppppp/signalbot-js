@@ -34,8 +34,8 @@
 		}
 		if (out.length) {
 		    try {
+			log(3, `Received <${out}>`);
 			let msg = JSON.parse(out);
-			log(3, `Received <${msg}>`);
 			_s(_c, msg);
 		    }
 		    catch (mperr) {
@@ -51,8 +51,8 @@
 	log(3, `Handling message ${_e.dataMessage.message}`);
 	let tokens = _e.dataMessage.message.split(' ');
 	if (_c.actions && tokens.length > 1 &&
-	    _c.actions[$tokens[0]+$tokens[1]]) {
-	    let cmd = _c.actions[$tokens[0]+$tokens[1]];
+	    _c.actions[tokens[0]+tokens[1]]) {
+	    let cmd = _c.actions[tokens[0]+tokens[1]];
 	    log(3, `Executing ${cmd}`);
 	    let fullcmd = `${cmd}|signal-cli send --message-from-stdin ${_e.source}`;
 	    exec(`bash -c "${fullcmd}"`, (e, out, err) => {
