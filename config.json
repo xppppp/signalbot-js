@@ -1,0 +1,10 @@
+{
+    "user": "the-signal-user-number",
+    "module": "javascript-module",
+    "permitted": [ "permitted-sender-1", "permitted-sender-2" ],
+    "actions": {
+	"xdf": "/usr/bin/df",
+	"default": "X"
+    },
+    "repeat": 300
+}
