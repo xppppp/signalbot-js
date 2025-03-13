@@ -40,7 +40,7 @@
 		     */
 		    out.toString().
 			replace(/\n/g,'').
-			split('}\n{').
+			split('}{').
 			forEach((msg) => {
 			    if (msg.match('^[^\{]')) {
 				msg = '{'+msg;
