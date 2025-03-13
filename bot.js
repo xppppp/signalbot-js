@@ -33,14 +33,29 @@
 		    log(2, `stderr: ${err}`);
 		}
 		if (out.length) {
-		    try {
-			log(3, `Received <${out}>`);
-			let msg = JSON.parse(out);
-			_s(_c, msg);
-		    }
-		    catch (mperr) {
-			_e(mperr);
-		    }
+		    log(3, `Received <${out}>`);
+		    /*
+		     * multiple messages are sent as concatenated JSON
+		     * objects.
+		     */
+		    out.toString().
+			replace(/\n/g,'').
+			split('}\n{').
+			forEach((msg) => {
+			    if (msg.match('^[^\{]')) {
+				msg = '{'+msg;
+			    }
+			    if (msg.match('[^\}]$')) {
+				msg = msg + '}'
+			    }
+			    log(4, `handle message <${msg}>`);
+			    try {
+				_s(_c, JSON.parse(msg));
+			    }
+			    catch (mperr) {
+				_e(mperr);
+			    }
+			});
 		} else {
 		    log(3, 'No messages');
 		}
