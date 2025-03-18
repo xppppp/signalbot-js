@@ -84,7 +84,29 @@
 	    });
 	} else {
 	    if (_c.actions['default'] && _c.support) {
-		_c.support.handler(_e);
+		_c.support.handler(_e, _c, (_r, _m) => {
+		    ((_r) ? [_r] :
+			_c.players.map((_cp) => {
+			    return(_cp.number);
+			})).forEach((_cr) => {
+			    let fullcmd = `signal-cli send -a ${_c.user} --message-from-stdin ${_cr}`;
+			    let child = execFile('bash',  ['-c', "${fullcmd}"], (e, out, err) => {
+				if (e) {
+				    throw(e);
+				} else {
+				    if (err.length) {
+					log(2, `send to ${_cr} stderr: ${err}`);
+				    }
+				    if (out.length) {
+					log(2, `send to ${_cr} stdout: ${out}`);
+				    }
+				}
+			    });
+			    var stdinStream = new stream.Readable();
+			    stdinStream.push(_m);  // Add data to the internal queue for users of the stream to consume
+			    stdinStream.push(null);   // Signals the end of the stream (EOF)
+			    stdinStream.pipe(child.stdin);			});
+		});
 	    } else {
 		log(3, `No default handler for ${_e.dataMessage.message}`);
 	    }
