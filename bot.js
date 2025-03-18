@@ -89,8 +89,8 @@
 			_c.players.map((_cp) => {
 			    return(_cp.number);
 			})).forEach((_cr) => {
-			    let fullcmd = `signal-cli send -a ${_c.user} --message-from-stdin ${_cr}`;
-			    let child = execFile('bash',  ['-c', "${fullcmd}"], (e, out, err) => {
+			    let fullcmd = `signal-cli send --message-from-stdin ${_cr}`;
+			    let child = exec(`/bin/bash -c "${fullcmd}"`, (e, out, err) => {
 				if (e) {
 				    throw(e);
 				} else {
@@ -102,10 +102,14 @@
 				    }
 				}
 			    });
-			    var stdinStream = new stream.Readable();
-			    stdinStream.push(_m);  // Add data to the internal queue for users of the stream to consume
-			    stdinStream.push(null);   // Signals the end of the stream (EOF)
-			    stdinStream.pipe(child.stdin);			});
+			    try {
+				child.stdin.write(_m);
+				child.stdin.end();
+			    }
+			    catch (werr) {
+				log(1, `Error piping input to ${fullcmd}: ${werr}`);
+			    }
+			});
 		});
 	    } else {
 		log(3, `No default handler for ${_e.dataMessage.message}`);
