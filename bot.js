@@ -84,6 +84,7 @@
 	    });
 	} else {
 	    if (_c.actions['default'] && _c.support) {
+		log(3, 'Dispatching to support handler');
 		_c.support.handler(_e, _c, (_r, _m) => {
 		    ((_r) ? [_r] :
 			_c.players.map((_cp) => {
@@ -121,9 +122,11 @@
 	    _m.envelope.dataMessage.message) {
 	    if (!_c.permitted || _c.permitted.includes(_m.envelope.source)) {
 		handleMessage(_c, _m.envelope);
+	    } else {
+		log(3, `${_m.envelope.source} is not permitted`);
 	    }
 	} else {
-	    throw(new Error('Malformed signal json'));
+	    log(3, 'Message has nothing to handle');
 	}
     };
     const handleError = (_err) => {
