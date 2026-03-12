@@ -65,10 +65,15 @@
     const handleMessage = (_c, _e) => {
 	log(3, `Handling message ${_e.dataMessage.message}`);
 	let tokens = _e.dataMessage.message.split(' ');
+	let messageGroupId = (_e.dataMessage.groupInfo) ?
+	    _e.dataMessage.groupInfo.groupId : '';
 	if (_c.actions && tokens.length > 1 &&
 	    _c.actions[tokens[0]+tokens[1]]) {
 	    let cmd = _c.actions[tokens[0]+tokens[1]];
 	    log(3, `Executing ${cmd}`);
+	    /*
+	     * actions output only sent to sender
+	     */
 	    let fullcmd = `${cmd}|signal-cli send --message-from-stdin ${_e.source}`;
 	    exec(`bash -c "${fullcmd}"`, (e, out, err) => {
 		if (e) {
@@ -86,31 +91,31 @@
 	    if (_c.actions['default'] && _c.support) {
 		log(3, 'Dispatching to support handler');
 		_c.support.handler(_e, _c, (_r, _m) => {
-		    ((_r) ? [_r] :
-			_c.players.map((_cp) => {
-			    return(_cp.number);
-			})).forEach((_cr) => {
-			    let fullcmd = `signal-cli send --message-from-stdin ${_cr}`;
-			    let child = exec(`/bin/bash -c "${fullcmd}"`, (e, out, err) => {
-				if (e) {
-				    throw(e);
-				} else {
-				    if (err.length) {
-					log(2, `send to ${_cr} stderr: ${err}`);
-				    }
-				    if (out.length) {
-					log(2, `send to ${_cr} stdout: ${out}`);
-				    }
+		    ((_r || messageGroupId.length) ? [_r] : _c.support.principals(_c)).forEach((_cr) => {
+			let fullcmd = 'signal-cli send --message-from-stdin ' +
+			    ((messageGroupId.length) ? '-g ${messageGroupId}' :
+			     _cr);
+			let child = exec(`/bin/bash -c "${fullcmd}"`, (e, out, err) => {
+			    if (e) {
+				throw(e);
+			    } else {
+				if (err.length) {
+				    log(2, `send to ${_cr} stderr: ${err}`);
 				}
-			    });
-			    try {
-				child.stdin.write(_m);
-				child.stdin.end();
-			    }
-			    catch (werr) {
-				log(1, `Error piping input to ${fullcmd}: ${werr}`);
+				if (out.length) {
+				    log(2, `send to ${_cr} stdout: ${out}`);
+				}
 			    }
 			});
+			try {
+			    child.stdin.write(_m);
+			    child.stdin.end();
+			}
+			catch (werr) {
+			    log(1, `Error piping input to ${fullcmd}: ${werr}`);
+			}
+		    });
+		    
 		});
 	    } else {
 		log(3, `No default handler for ${_e.dataMessage.message}`);
@@ -120,7 +125,14 @@
     const dispatchAction = (_c, _m) => {
 	if (_m.envelope && _m.envelope.source && _m.envelope.dataMessage &&
 	    _m.envelope.dataMessage.message) {
-	    if (!_c.permitted || _c.permitted.includes(_m.envelope.source)) {
+	    if (!_c.permitted || _c.permitted.includes(_m.envelope.source) ||
+		(_m.envelope.dataMessage.groupInfo &&
+		 _m.envelope.dataMessage.groupInfo.groupId &&
+		 _c.permitted.includes(
+		     _m.envelope.dataMessage.groupInfo.groupId)
+		)
+	       ) {
+		log(4, `${_m.envelope.source} is permitted`);
 		handleMessage(_c, _m.envelope);
 	    } else {
 		log(3, `${_m.envelope.source} is not permitted`);
