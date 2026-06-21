@@ -3,3 +3,4 @@ localconfig.json
 local
 tmp
 node_modules
+scores.db

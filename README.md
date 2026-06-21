@@ -62,6 +62,32 @@ The bot is configured via `config.json`.
     - If a user sends a message starting with a key in this map (e.g., `df`), the bot executes the corresponding shell command and sends the output back to the user.
 - **`repeat`**: The interval (in seconds) the bot waits before checking for new messages.
 
+## Custom Handler Modules
+
+The bot supports dynamic handler modules for complex logic. To create one, create a JavaScript file (e.g., `my-handler.js`) in the root directory and specify its name in the `module` field of `config.json`.
+
+### Interface
+The module must export a `handler` function:
+
+```javascript
+module.exports = {
+    async handler(envelope, config) {
+        const message = envelope.dataMessage.message;
+        
+        // Your logic here...
+
+        return {
+            recipients: [envelope.source], // Array of phone numbers or group IDs
+            message: 'Hello! This is a custom response.'
+        };
+    }
+};
+```
+
+- **`envelope`**: Contains the Signal message data, including `source` (sender) and `dataMessage` (content).
+- **`config`**: The bot's current configuration object.
+- **Return Value**: A promise resolving to a response object `{ recipients: string[], message: string }`. If the function returns `null` or `undefined`, no response is sent.
+
 ## Running the Bot
 
 ### Basic Start

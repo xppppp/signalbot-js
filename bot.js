@@ -19,8 +19,19 @@ async function readConfig(configPath, onConfigLoaded, verboseLevel) {
         log(3, `config: success ${JSON.stringify(config)}`, verboseLevel);
 
         if (config.module) {
-            log(3, `config: loading ${config.module}`, verboseLevel);
-            config.support = require('./' + config.module);
+            log(3, `config: loading ${config.module}...`, verboseLevel);
+            try {
+                // Dynamic import allows loading both ESM and CommonJS modules asynchronously
+                const modulePath = `./${config.module}.js`;
+                const imported = await import(modulePath);
+                
+                // Support both 'export default' (ESM) and 'module.exports' (CJS)
+                config.support = imported.default || imported;
+                log(3, `config: successfully loaded ${config.module}`, verboseLevel);
+            } catch (err) {
+                log(1, `config: failed to load module ${config.module}: ${err.message}`, verboseLevel);
+                config.support = null;
+            }
         }
         onConfigLoaded(config);
     } catch (err) {
@@ -41,8 +52,6 @@ async function getMessages(config, onMessageReceived, onError, verboseLevel) {
         if (stdout) {
             log(3, `Received <${stdout}>`, verboseLevel);
             
-            // Concatenated JSON objects: {"a":1}{"b":2}
-            // A robust way to split them is to find the boundary between } and {
             const jsonStrings = stdout
                 .trim()
                 .split(/}\s*{/)
@@ -82,9 +91,6 @@ async function handleMessage(config, envelope, verboseLevel) {
         const cmd = config.actions[actionKey];
         log(3, `Executing ${cmd}`, verboseLevel);
         
-        // To prevent shell injection, we should ideally not use a shell.
-        // But since the config defines full commands, we'll stick to exec but 
-        // be mindful. In a real scenario, we'd use spawn with args.
         const fullCmd = `${cmd} | signal-cli send --message-from-stdin ${envelope.source}`;
         try {
             const { stdout, stderr } = await execPromise(`bash -c "${fullCmd.replace(/"/g, '"')}"`);
@@ -93,33 +99,37 @@ async function handleMessage(config, envelope, verboseLevel) {
         } catch (err) {
             console.error(`Execution error for ${fullCmd}:`, err);
         }
-    } else if (config.actions['default'] && config.support) {
+    } else if (config.actions['default'] && config.support && config.support.handler) {
         log(3, 'Dispatching to support handler', verboseLevel);
         
-        // The support handler is expected to be callback-based based on current implementation
-        config.support.handler(envelope, config, (response, messageBody) => {
-            const recipients = (response || messageGroupId) ? [response] : config.support.principals(config);
+        try {
+            // The handler now returns a Response Object: { recipients: [], message: "" }
+            const response = await config.support.handler(envelope, config);
             
-            recipients.forEach(async (recipient) => {
-                const target = messageGroupId ? `-g ${messageGroupId}` : recipient;
-                const fullCmd = `signal-cli send --message-from-stdin ${target}`;
-                
-                try {
-                    // Using exec instead of spawn for simplicity in piping, 
-                    // but wrapping it in a way that we can write to stdin.
-                    const { exec: spawnExec } = require('child_process');
-                    const child = spawnExec(`/bin/bash -c "${fullCmd}"`);
+            if (response && response.recipients && response.message) {
+                for (const recipient of response.recipients) {
+                    const target = messageGroupId ? `-g ${messageGroupId}` : recipient;
+                    const fullCmd = `signal-cli send --message-from-stdin ${target}`;
                     
-                    child.stdin.write(messageBody);
-                    child.stdin.end();
-                    
-                    child.stdout.on('data', (data) => log(2, `send to ${recipient} stdout: ${data}`, verboseLevel));
-                    child.stderr.on('data', (data) => log(2, `send to ${recipient} stderr: ${data}`, verboseLevel));
-                } catch (err) {
-                    log(1, `Error piping input to ${fullCmd}: ${err}`, verboseLevel);
+                    try {
+                        const { exec: spawnExec } = require('child_process');
+                        const child = spawnExec(`/bin/bash -c "${fullCmd}"`);
+                        
+                        child.stdin.write(response.message);
+                        child.stdin.end();
+                        
+                        child.stdout.on('data', (data) => log(2, `send to ${recipient} stdout: ${data}`, verboseLevel));
+                        child.stderr.on('data', (data) => log(2, `send to ${recipient} stderr: ${data}`, verboseLevel));
+                    } catch (err) {
+                        log(1, `Error piping input to ${fullCmd}: ${err}`, verboseLevel);
+                    }
                 }
-            });
-        });
+            } else {
+                log(3, 'Support handler returned no valid response object', verboseLevel);
+            }
+        } catch (err) {
+            log(1, `Error in support handler: ${err.message}`, verboseLevel);
+        }
     } else {
         log(3, `No default handler for ${message}`, verboseLevel);
     }
