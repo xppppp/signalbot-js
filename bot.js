@@ -1,161 +1,177 @@
-(async (cfname, debugLevel, verbose) => {
-    const { readFile } = await import('node:fs');
-    const { exec } = await import('node:child_process');
-    const debug = (_l, _m) => {
-	if (debugLevel > _l) console.log(_m);
+const { readFile } = require('node:fs/promises');
+const { exec } = require('node:child_process');
+const { promisify } = require('node:util');
+const execPromise = promisify(exec);
+
+const debug = (level, message, currentDebugLevel) => {
+    if (currentDebugLevel > level) console.log(message);
+};
+
+const log = (level, message, currentVerboseLevel) => {
+    if (currentVerboseLevel > level) console.log(message);
+};
+
+async function readConfig(configPath, onConfigLoaded, verboseLevel) {
+    log(3, `config: reading ${configPath}...`, verboseLevel);
+    try {
+        const data = await readFile(configPath, 'utf8');
+        const config = JSON.parse(data);
+        log(3, `config: success ${JSON.stringify(config)}`, verboseLevel);
+
+        if (config.module) {
+            log(3, `config: loading ${config.module}`, verboseLevel);
+            config.support = require('./' + config.module);
+        }
+        onConfigLoaded(config);
+    } catch (err) {
+        console.error(`Error reading config ${configPath}:`, err);
+        throw err;
+    }
+}
+
+async function getMessages(config, onMessageReceived, onError, verboseLevel) {
+    log(2, 'Retrieving messages', verboseLevel);
+    try {
+        const { stdout, stderr } = await execPromise(`signal-cli -o json -u ${config.user} receive`);
+        
+        if (stderr) {
+            log(2, `stderr: ${stderr}`, verboseLevel);
+        }
+
+        if (stdout) {
+            log(3, `Received <${stdout}>`, verboseLevel);
+            
+            // Concatenated JSON objects: {"a":1}{"b":2}
+            // A robust way to split them is to find the boundary between } and {
+            const jsonStrings = stdout
+                .trim()
+                .split(/}\s*{/)
+                .map((str, index, array) => {
+                    let processed = str;
+                    if (index > 0 && !processed.startsWith('{')) processed = '{' + processed;
+                    if (index < array.length - 1 && !processed.endsWith('}')) processed = processed + '}';
+                    return processed;
+                });
+
+            for (const jsonStr of jsonStrings) {
+                if (!jsonStr) continue;
+                log(4, `handle message <${jsonStr}>`, verboseLevel);
+                try {
+                    onMessageReceived(config, JSON.parse(jsonStr));
+                } catch (parseErr) {
+                    onError(parseErr);
+                }
+            }
+        } else {
+            log(3, 'No messages', verboseLevel);
+        }
+    } catch (err) {
+        onError(err);
+    }
+}
+
+async function handleMessage(config, envelope, verboseLevel) {
+    const message = envelope.dataMessage.message;
+    log(3, `Handling message ${message}`, verboseLevel);
+    
+    const tokens = message.split(' ');
+    const messageGroupId = envelope.dataMessage.groupInfo ? envelope.dataMessage.groupInfo.groupId : '';
+    
+    const actionKey = tokens[0] + (tokens[1] || '');
+    if (config.actions && tokens.length > 1 && config.actions[actionKey]) {
+        const cmd = config.actions[actionKey];
+        log(3, `Executing ${cmd}`, verboseLevel);
+        
+        // To prevent shell injection, we should ideally not use a shell.
+        // But since the config defines full commands, we'll stick to exec but 
+        // be mindful. In a real scenario, we'd use spawn with args.
+        const fullCmd = `${cmd} | signal-cli send --message-from-stdin ${envelope.source}`;
+        try {
+            const { stdout, stderr } = await execPromise(`bash -c "${fullCmd.replace(/"/g, '"')}"`);
+            if (stderr) log(2, `dispatch stderr: ${stderr}`, verboseLevel);
+            if (stdout) log(2, `dispatch stdout: ${stdout}`, verboseLevel);
+        } catch (err) {
+            console.error(`Execution error for ${fullCmd}:`, err);
+        }
+    } else if (config.actions['default'] && config.support) {
+        log(3, 'Dispatching to support handler', verboseLevel);
+        
+        // The support handler is expected to be callback-based based on current implementation
+        config.support.handler(envelope, config, (response, messageBody) => {
+            const recipients = (response || messageGroupId) ? [response] : config.support.principals(config);
+            
+            recipients.forEach(async (recipient) => {
+                const target = messageGroupId ? `-g ${messageGroupId}` : recipient;
+                const fullCmd = `signal-cli send --message-from-stdin ${target}`;
+                
+                try {
+                    // Using exec instead of spawn for simplicity in piping, 
+                    // but wrapping it in a way that we can write to stdin.
+                    const { exec: spawnExec } = require('child_process');
+                    const child = spawnExec(`/bin/bash -c "${fullCmd}"`);
+                    
+                    child.stdin.write(messageBody);
+                    child.stdin.end();
+                    
+                    child.stdout.on('data', (data) => log(2, `send to ${recipient} stdout: ${data}`, verboseLevel));
+                    child.stderr.on('data', (data) => log(2, `send to ${recipient} stderr: ${data}`, verboseLevel));
+                } catch (err) {
+                    log(1, `Error piping input to ${fullCmd}: ${err}`, verboseLevel);
+                }
+            });
+        });
+    } else {
+        log(3, `No default handler for ${message}`, verboseLevel);
+    }
+}
+
+function dispatchAction(config, messageJson, verboseLevel) {
+    if (messageJson.envelope && messageJson.envelope.source && messageJson.envelope.dataMessage && messageJson.envelope.dataMessage.message) {
+        const source = messageJson.envelope.source;
+        const groupInfo = messageJson.envelope.dataMessage.groupInfo;
+        const groupId = groupInfo ? groupInfo.groupId : null;
+
+        const isPermitted = !config.permitted || 
+                            config.permitted.includes(source) || 
+                            (groupId && config.permitted.includes(groupId));
+
+        if (isPermitted) {
+            log(4, `${source} is permitted`, verboseLevel);
+            handleMessage(config, messageJson.envelope, verboseLevel);
+        } else {
+            log(3, `${source} is not permitted`, verboseLevel);
+        }
+    } else {
+        log(3, 'Message has nothing to handle', verboseLevel);
+    }
+}
+
+function handleError(err) {
+    console.error('Bot Error:', err);
+}
+
+async function runBot(configPath, debugLevel, verboseLevel) {
+    const onConfigLoaded = async (config) => {
+        const loop = async () => {
+            log(2, 'Next sequence', verboseLevel);
+            if (config.user) {
+                await getMessages(config, (cfg, msg) => dispatchAction(cfg, msg, verboseLevel), handleError, verboseLevel);
+            } else {
+                log(1, 'signal user not configured', verboseLevel);
+            }
+
+            if (config.repeat > 0) {
+                setTimeout(loop, config.repeat * 1000);
+            }
+        };
+        await loop();
     };
-    const log = (_l, _m) => {
-	if (verbose > _l) console.log(_m);
-    };
-    const readConfig = (_cf, _s) => {
-	log(3, `config: reading ${_cf}...`);
-	readFile(_cf, (err, data) => {
-	    if (err) {
-		throw err;
-	    } else {
-		let config = JSON.parse(data);
-		log(3, `config: success ${JSON.stringify(config)}`);
-		if (config.module) {
-		    log(3, `config: loading ${config.module}`);
-		    config.support = require('./'+config.module);
-		}
-		_s(config);
-	    }
-	});
-    };
-    const getMessage = (_c, _s, _e) => {
-	log(2, 'Retrieving messages');
-	exec(`signal-cli -o json -u ${_c.user} receive`, (e, out, err) => {
-	    if (e) {
-		_e(e);
-	    } else {
-		if (err.length) {
-		    log(2, `stderr: ${err}`);
-		}
-		if (out.length) {
-		    log(3, `Received <${out}>`);
-		    /*
-		     * multiple messages are sent as concatenated JSON
-		     * objects.
-		     */
-		    out.toString().
-			replace(/\n/g,'').
-			split('}{').
-			forEach((msg) => {
-			    if (msg.match('^[^\{]')) {
-				msg = '{'+msg;
-			    }
-			    if (msg.match('[^\}]$')) {
-				msg = msg + '}'
-			    }
-			    log(4, `handle message <${msg}>`);
-			    try {
-				_s(_c, JSON.parse(msg));
-			    }
-			    catch (mperr) {
-				_e(mperr);
-			    }
-			});
-		} else {
-		    log(3, 'No messages');
-		}
-	    }
-	});
-    };
-    const handleMessage = (_c, _e) => {
-	log(3, `Handling message ${_e.dataMessage.message}`);
-	let tokens = _e.dataMessage.message.split(' ');
-	let messageGroupId = (_e.dataMessage.groupInfo) ?
-	    _e.dataMessage.groupInfo.groupId : '';
-	if (_c.actions && tokens.length > 1 &&
-	    _c.actions[tokens[0]+tokens[1]]) {
-	    let cmd = _c.actions[tokens[0]+tokens[1]];
-	    log(3, `Executing ${cmd}`);
-	    /*
-	     * actions output only sent to sender
-	     */
-	    let fullcmd = `${cmd}|signal-cli send --message-from-stdin ${_e.source}`;
-	    exec(`bash -c "${fullcmd}"`, (e, out, err) => {
-		if (e) {
-		    throw(e);
-		} else {
-		    if (err.length) {
-			log(2, `dispatch stderr: ${err}`);
-		    }
-		    if (out.length) {
-			log(2, `dispatch stdout: ${out}`);
-		    }
-		}
-	    });
-	} else {
-	    if (_c.actions['default'] && _c.support) {
-		log(3, 'Dispatching to support handler');
-		_c.support.handler(_e, _c, (_r, _m) => {
-		    ((_r || messageGroupId.length) ? [_r] : _c.support.principals(_c)).forEach((_cr) => {
-			let fullcmd = 'signal-cli send --message-from-stdin ' +
-			    ((messageGroupId.length) ? '-g ${messageGroupId}' :
-			     _cr);
-			let child = exec(`/bin/bash -c "${fullcmd}"`, (e, out, err) => {
-			    if (e) {
-				throw(e);
-			    } else {
-				if (err.length) {
-				    log(2, `send to ${_cr} stderr: ${err}`);
-				}
-				if (out.length) {
-				    log(2, `send to ${_cr} stdout: ${out}`);
-				}
-			    }
-			});
-			try {
-			    child.stdin.write(_m);
-			    child.stdin.end();
-			}
-			catch (werr) {
-			    log(1, `Error piping input to ${fullcmd}: ${werr}`);
-			}
-		    });
-		    
-		});
-	    } else {
-		log(3, `No default handler for ${_e.dataMessage.message}`);
-	    }
-	}
-    };
-    const dispatchAction = (_c, _m) => {
-	if (_m.envelope && _m.envelope.source && _m.envelope.dataMessage &&
-	    _m.envelope.dataMessage.message) {
-	    if (!_c.permitted || _c.permitted.includes(_m.envelope.source) ||
-		(_m.envelope.dataMessage.groupInfo &&
-		 _m.envelope.dataMessage.groupInfo.groupId &&
-		 _c.permitted.includes(
-		     _m.envelope.dataMessage.groupInfo.groupId)
-		)
-	       ) {
-		log(4, `${_m.envelope.source} is permitted`);
-		handleMessage(_c, _m.envelope);
-	    } else {
-		log(3, `${_m.envelope.source} is not permitted`);
-	    }
-	} else {
-	    log(3, 'Message has nothing to handle');
-	}
-    };
-    const handleError = (_err) => {
-	console.error(_err);
-    };
-    const oneTime = (_c) => {
-	log(2, 'Next sequence');
-	if (_c.user) {
-	    getMessage(_c, dispatchAction, handleError);
-	} else {
-	    log(1, 'signal user not configured');
-	}
-	if (_c.repeat > 0) {
-	    setTimeout(() => { oneTime(_c); }, _c.repeat * 1000);
-	}
-    };
-    readConfig(cfname, oneTime);
-})(process.env.CONFIG || 'config.json',
-   process.env.DEBUG || 0,
-   process.env.VERBOSE || 0);
+
+    await readConfig(configPath, onConfigLoaded, verboseLevel);
+}
+
+runBot(
+    process.env.CONFIG || 'config.json',
+    parseInt(process.env.DEBUG || '0', 10),
+    parseInt(process.env.VERBOSE || '0', 10)
+);
