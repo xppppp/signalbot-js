@@ -98,9 +98,10 @@ node bot.js
 ### Using Environment Variables
 You can override the config file and log levels using environment variables:
 ```bash
-CONFIG=my_config.json DEBUG=1 VERBOSE=1 node bot.js
+CONFIG=my_config.json REPLAY=messages.json DEBUG=1 VERBOSE=1 node bot.js
 ```
 - `CONFIG`: Path to the configuration file.
+- `REPLAY`: Path to a JSON or NDJSON file containing messages to replay.
 - `DEBUG`: Enable debug logging (higher numbers = more verbose).
 - `VERBOSE`: Enable verbose logging (higher numbers = more verbose).
 
@@ -110,4 +111,6 @@ For production, it is recommended to use a process manager like **PM2**.
 
 1. Install PM2: `npm install pm2 -g`
 2. Start the bot: `pm2 start bot.js --name signal-bot`
+3. Enable auto-start on reboot: `pm2 startup` and `pm2 save`
+nal-bot`
 3. Enable auto-start on reboot: `pm2 startup` and `pm2 save`

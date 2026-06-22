@@ -41,6 +41,44 @@ async function readConfig(configPath, onConfigLoaded, verboseLevel) {
 }
 
 async function getMessages(config, onMessageReceived, onError, verboseLevel) {
+    const replayPath = config.replay || process.env.REPLAY;
+    if (replayPath) {
+        log(2, `config/env replay: reading ${replayPath}...`, verboseLevel);
+        try {
+            const data = await readFile(replayPath, 'utf8');
+            let messages = [];
+            const trimmed = data.trim();
+            if (trimmed.startsWith('[')) {
+                messages = JSON.parse(trimmed);
+            } else {
+                // Support NDJSON (one JSON object per line)
+                messages = trimmed.split('\n')
+                    .map(line => line.trim())
+                    .filter(line => line.length > 0)
+                    .map(line => JSON.parse(line));
+            }
+
+            log(2, `config/env replay: replaying ${messages.length} messages...`, verboseLevel);
+            for (const msg of messages) {
+                log(4, `replay message <${JSON.stringify(msg)}>`, verboseLevel);
+                try {
+                    onMessageReceived(config, msg);
+                } catch (msgErr) {
+                    onError(msgErr);
+                }
+            }
+        } catch (err) {
+            log(1, `config/env replay: failed to replay from ${replayPath}: ${err.message}`, verboseLevel);
+            onError(err);
+        } finally {
+            // Clear the replay config and env so we don't replay again on subsequent loops
+            config.replay = null;
+            if (process.env.REPLAY) {
+                delete process.env.REPLAY;
+            }
+        }
+    }
+
     log(2, 'Retrieving messages', verboseLevel);
     try {
         const { stdout, stderr } = await execPromise(`signal-cli -o json -u ${config.user} receive`);
@@ -180,8 +218,18 @@ async function runBot(configPath, debugLevel, verboseLevel) {
     await readConfig(configPath, onConfigLoaded, verboseLevel);
 }
 
-runBot(
-    process.env.CONFIG || 'config.json',
-    parseInt(process.env.DEBUG || '0', 10),
-    parseInt(process.env.VERBOSE || '0', 10)
-);
+if (require.main === module) {
+    runBot(
+        process.env.CONFIG || 'config.json',
+        parseInt(process.env.DEBUG || '0', 10),
+        parseInt(process.env.VERBOSE || '0', 10)
+    );
+}
+
+module.exports = {
+    readConfig,
+    getMessages,
+    handleMessage,
+    dispatchAction,
+    runBot
+};
