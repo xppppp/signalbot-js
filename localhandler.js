@@ -27,10 +27,12 @@ module.exports = {
         // For example, you could check for specific keywords, 
         // query a database, or call an external API.
 
-        // Return a structured response object
+        // Return an array structured response objects
         return {
-            recipients: [envelope.source], // Send response back to the original sender
-            message: `You said: "${message}". This is a response from the generic example handler!`
-        };
+            [ {
+		recipients: [envelope.source], // Send response back to the original sender
+		message: `You said: "${message}". This is a response from the generic example handler!`
+	    } ]
+        );
     }
 };

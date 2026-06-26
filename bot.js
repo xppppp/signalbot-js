@@ -10,6 +10,7 @@ const debug = (level, message, currentDebugLevel) => {
 const log = (level, message, currentVerboseLevel) => {
     if (currentVerboseLevel > level) console.log(message);
 };
+let signalCmd = process.env.SIGNAL_COMMAND;
 
 async function readConfig(configPath, onConfigLoaded, verboseLevel) {
     log(3, `config: reading ${configPath}...`, verboseLevel);
@@ -33,6 +34,7 @@ async function readConfig(configPath, onConfigLoaded, verboseLevel) {
                 config.support = null;
             }
         }
+	signalCmd = config.signal_command || signalCmd || 'signal-cli';
         onConfigLoaded(config);
     } catch (err) {
         console.error(`Error reading config ${configPath}:`, err);
@@ -81,7 +83,7 @@ async function getMessages(config, onMessageReceived, onError, verboseLevel) {
 
     log(2, 'Retrieving messages', verboseLevel);
     try {
-        const { stdout, stderr } = await execPromise(`signal-cli -o json -u ${config.user} receive`);
+        const { stdout, stderr } = await execPromise(`${signalCmd} -o json -u ${config.user} receive`);
         
         if (stderr) {
             log(2, `stderr: ${stderr}`, verboseLevel);
@@ -129,7 +131,7 @@ async function handleMessage(config, envelope, verboseLevel) {
         const cmd = config.actions[actionKey];
         log(3, `Executing ${cmd}`, verboseLevel);
         
-        const fullCmd = `${cmd} | signal-cli send --message-from-stdin ${envelope.source}`;
+        const fullCmd = `${cmd} | ${signalCmd} send --message-from-stdin ${envelope.source}`;
         try {
             const { stdout, stderr } = await execPromise(`bash -c "${fullCmd.replace(/"/g, '"')}"`);
             if (stderr) log(2, `dispatch stderr: ${stderr}`, verboseLevel);
@@ -141,29 +143,36 @@ async function handleMessage(config, envelope, verboseLevel) {
         log(3, 'Dispatching to support handler', verboseLevel);
         
         try {
-            // The handler now returns a Response Object: { recipients: [], message: "" }
-            const response = await config.support.handler(envelope, config);
+            // The handler now returns an Array of Response: [{ recipients: [], message: "" }]
+            const responses = await config.support.handler(envelope, config);
             
-            if (response && response.recipients && response.message) {
-                for (const recipient of response.recipients) {
-                    const target = messageGroupId ? `-g ${messageGroupId}` : recipient;
-                    const fullCmd = `signal-cli send --message-from-stdin ${target}`;
+            if (responses) {
+		for (const response of responses) {
+		    if (response.recipients && response.message) {
+			for (const recipient of response.recipients) {
+			    const target = messageGroupId ? `-g ${messageGroupId}` : recipient;
+			    const fullCmd = `${signalCmd} send --message-from-stdin ${target}`;
                     
-                    try {
-                        const { exec: spawnExec } = require('child_process');
-                        const child = spawnExec(`/bin/bash -c "${fullCmd}"`);
+			    try {
+				const { exec: spawnExec } = require('child_process');
+				const child = spawnExec(`/bin/bash -c "${fullCmd}"`);
                         
-                        child.stdin.write(response.message);
-                        child.stdin.end();
+				child.stdin.write(response.message);
+				child.stdin.end();
                         
-                        child.stdout.on('data', (data) => log(2, `send to ${recipient} stdout: ${data}`, verboseLevel));
-                        child.stderr.on('data', (data) => log(2, `send to ${recipient} stderr: ${data}`, verboseLevel));
-                    } catch (err) {
-                        log(1, `Error piping input to ${fullCmd}: ${err}`, verboseLevel);
-                    }
+				child.stdout.on('data', (data) => log(2, `send to ${recipient} stdout: ${data}`, verboseLevel));
+				child.stderr.on('data', (data) => log(2, `send to ${recipient} stderr: ${data}`, verboseLevel));
+			    } catch (err) {
+				log(1, `Error piping input to ${fullCmd}: ${err}`, verboseLevel);
+			    }
+			}
+		    } else {
+			log(3, 'Response had no recipients or message: ' +
+			    JSON.stringify(response), verboseLevel);
+		    }
                 }
             } else {
-                log(3, 'Support handler returned no valid response object', verboseLevel);
+                log(3, 'Support handler returned no responses', verboseLevel);
             }
         } catch (err) {
             log(1, `Error in support handler: ${err.message}`, verboseLevel);
