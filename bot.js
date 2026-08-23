@@ -3,13 +3,10 @@ const { exec } = require('node:child_process');
 const { promisify } = require('node:util');
 const execPromise = promisify(exec);
 
-const debug = (level, message, currentDebugLevel) => {
-    if (currentDebugLevel > level) console.log(message);
-};
-
 const log = (level, message, currentVerboseLevel) => {
     if (currentVerboseLevel > level) console.log(message);
 };
+
 let signalCmd = process.env.SIGNAL_COMMAND;
 
 async function readConfig(configPath, onConfigLoaded, verboseLevel) {
@@ -25,7 +22,7 @@ async function readConfig(configPath, onConfigLoaded, verboseLevel) {
                 // Dynamic import allows loading both ESM and CommonJS modules asynchronously
                 const modulePath = `./${config.module}.js`;
                 const imported = await import(modulePath);
-                
+
                 // Support both 'export default' (ESM) and 'module.exports' (CJS)
                 config.support = imported.default || imported;
                 log(3, `config: successfully loaded ${config.module}`, verboseLevel);
@@ -34,7 +31,7 @@ async function readConfig(configPath, onConfigLoaded, verboseLevel) {
                 config.support = null;
             }
         }
-	signalCmd = config.signal_command || signalCmd || 'signal-cli';
+        signalCmd = config.signal_command || signalCmd || 'signal-cli';
         onConfigLoaded(config);
     } catch (err) {
         console.error(`Error reading config ${configPath}:`, err);
@@ -64,7 +61,10 @@ async function getMessages(config, onMessageReceived, onError, verboseLevel) {
             for (const msg of messages) {
                 log(4, `replay message <${JSON.stringify(msg)}>`, verboseLevel);
                 try {
-                    onMessageReceived(config, msg);
+                    // Awaited so messages are handled one at a time - handlers
+                    // read-modify-write shared state (e.g. a scores file), and
+                    // dispatching a whole batch concurrently would race.
+                    await onMessageReceived(config, msg);
                 } catch (msgErr) {
                     onError(msgErr);
                 }
@@ -84,14 +84,14 @@ async function getMessages(config, onMessageReceived, onError, verboseLevel) {
     log(2, 'Retrieving messages', verboseLevel);
     try {
         const { stdout, stderr } = await execPromise(`${signalCmd} -o json -u ${config.user} receive`);
-        
+
         if (stderr) {
             log(2, `stderr: ${stderr}`, verboseLevel);
         }
 
         if (stdout) {
             log(3, `Received <${stdout}>`, verboseLevel);
-            
+
             const jsonStrings = stdout
                 .trim()
                 .split(/}\s*{/)
@@ -106,7 +106,10 @@ async function getMessages(config, onMessageReceived, onError, verboseLevel) {
                 if (!jsonStr) continue;
                 log(4, `handle message <${jsonStr}>`, verboseLevel);
                 try {
-                    onMessageReceived(config, JSON.parse(jsonStr));
+                    // Awaited for the same reason as the replay loop above:
+                    // one receive() call can return several queued messages,
+                    // and handling them concurrently would race on shared state.
+                    await onMessageReceived(config, JSON.parse(jsonStr));
                 } catch (parseErr) {
                     onError(parseErr);
                 }
@@ -122,54 +125,62 @@ async function getMessages(config, onMessageReceived, onError, verboseLevel) {
 async function handleMessage(config, envelope, verboseLevel) {
     const message = envelope.dataMessage.message;
     log(3, `Handling message ${message}`, verboseLevel);
-    
+
     const tokens = message.split(' ');
     const messageGroupId = envelope.dataMessage.groupInfo ? envelope.dataMessage.groupInfo.groupId : '';
-    
+
     const actionKey = tokens[0] + (tokens[1] || '');
     if (config.actions && tokens.length > 1 && config.actions[actionKey]) {
         const cmd = config.actions[actionKey];
         log(3, `Executing ${cmd}`, verboseLevel);
-        
+
+        // Escape any embedded double quotes so they can't break out of the
+        // surrounding bash -c "..." wrapper below.
         const fullCmd = `${cmd} | ${signalCmd} send --message-from-stdin ${envelope.source}`;
         try {
-            const { stdout, stderr } = await execPromise(`bash -c "${fullCmd.replace(/"/g, '"')}"`);
+            const { stdout, stderr } = await execPromise(`bash -c "${fullCmd.replace(/"/g, '\\"')}"`);
             if (stderr) log(2, `dispatch stderr: ${stderr}`, verboseLevel);
             if (stdout) log(2, `dispatch stdout: ${stdout}`, verboseLevel);
         } catch (err) {
             console.error(`Execution error for ${fullCmd}:`, err);
         }
-    } else if (config.actions['default'] && config.support && config.support.handler) {
+    } else if (config.actions?.default && config.support?.handler) {
         log(3, 'Dispatching to support handler', verboseLevel);
-        
+
         try {
-            // The handler now returns an Array of Response: [{ recipients: [], message: "" }]
+            // The handler returns an array of Response: [{ recipients: [], message: '' }]
             const responses = await config.support.handler(envelope, config);
-            
+
             if (responses) {
-		for (const response of responses) {
-		    if (response.recipients && response.message) {
-			for (const recipient of response.recipients) {
-			    const target = messageGroupId ? `-g ${messageGroupId}` : recipient;
-			    const fullCmd = `${signalCmd} send --message-from-stdin ${target}`;
-                    
-			    try {
-				const { exec: spawnExec } = require('child_process');
-				const child = spawnExec(`/bin/bash -c "${fullCmd}"`);
-                        
-				child.stdin.write(response.message);
-				child.stdin.end();
-                        
-				child.stdout.on('data', (data) => log(2, `send to ${recipient} stdout: ${data}`, verboseLevel));
-				child.stderr.on('data', (data) => log(2, `send to ${recipient} stderr: ${data}`, verboseLevel));
-			    } catch (err) {
-				log(1, `Error piping input to ${fullCmd}: ${err}`, verboseLevel);
-			    }
-			}
-		    } else {
-			log(3, 'Response had no recipients or message: ' +
-			    JSON.stringify(response), verboseLevel);
-		    }
+                for (const response of responses) {
+                    if (response.recipients && response.message) {
+                        for (const recipient of response.recipients) {
+                            const target = messageGroupId ? `-g ${messageGroupId}` : recipient;
+                            const fullCmd = `${signalCmd} send --message-from-stdin ${target}`;
+
+                            try {
+                                const child = exec(`/bin/bash -c "${fullCmd}"`);
+
+                                // A write to child.stdin failing (e.g. the
+                                // process exited immediately) surfaces as an
+                                // async 'error' event, not a thrown
+                                // exception - an unhandled one would crash
+                                // the whole bot, so it needs its own listener.
+                                child.on('error', (err) => log(1, `Error spawning ${fullCmd}: ${err}`, verboseLevel));
+                                child.stdin.on('error', (err) => log(1, `Error piping input to ${fullCmd}: ${err}`, verboseLevel));
+
+                                child.stdin.write(response.message);
+                                child.stdin.end();
+
+                                child.stdout.on('data', (data) => log(2, `send to ${recipient} stdout: ${data}`, verboseLevel));
+                                child.stderr.on('data', (data) => log(2, `send to ${recipient} stderr: ${data}`, verboseLevel));
+                            } catch (err) {
+                                log(1, `Error piping input to ${fullCmd}: ${err}`, verboseLevel);
+                            }
+                        }
+                    } else {
+                        log(3, 'Response had no recipients or message: ' + JSON.stringify(response), verboseLevel);
+                    }
                 }
             } else {
                 log(3, 'Support handler returned no responses', verboseLevel);
@@ -182,19 +193,21 @@ async function handleMessage(config, envelope, verboseLevel) {
     }
 }
 
-function dispatchAction(config, messageJson, verboseLevel) {
-    if (messageJson.envelope && messageJson.envelope.source && messageJson.envelope.dataMessage && messageJson.envelope.dataMessage.message) {
+async function dispatchAction(config, messageJson, verboseLevel) {
+    if (messageJson.envelope?.source && messageJson.envelope?.dataMessage?.message) {
         const source = messageJson.envelope.source;
         const groupInfo = messageJson.envelope.dataMessage.groupInfo;
         const groupId = groupInfo ? groupInfo.groupId : null;
 
-        const isPermitted = !config.permitted || 
-                            config.permitted.includes(source) || 
+        const isPermitted = !config.permitted ||
+                            config.permitted.includes(source) ||
                             (groupId && config.permitted.includes(groupId));
 
         if (isPermitted) {
             log(4, `${source} is permitted`, verboseLevel);
-            handleMessage(config, messageJson.envelope, verboseLevel);
+            // Awaited (not fire-and-forget) so the caller's per-message loop
+            // stays sequential - see getMessages.
+            await handleMessage(config, messageJson.envelope, verboseLevel);
         } else {
             log(3, `${source} is not permitted`, verboseLevel);
         }
@@ -207,7 +220,7 @@ function handleError(err) {
     console.error('Bot Error:', err);
 }
 
-async function runBot(configPath, debugLevel, verboseLevel) {
+async function runBot(configPath, verboseLevel) {
     const onConfigLoaded = async (config) => {
         const loop = async () => {
             log(2, 'Next sequence', verboseLevel);
@@ -230,7 +243,6 @@ async function runBot(configPath, debugLevel, verboseLevel) {
 if (require.main === module) {
     runBot(
         process.env.CONFIG || 'config.json',
-        parseInt(process.env.DEBUG || '0', 10),
         parseInt(process.env.VERBOSE || '0', 10)
     );
 }

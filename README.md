@@ -76,17 +76,19 @@ module.exports = {
         
         // Your logic here...
 
-        return {
-            recipients: [envelope.source], // Array of phone numbers or group IDs
-            message: 'Hello! This is a custom response.'
-        };
+        return [
+            {
+                recipients: [envelope.source], // Array of phone numbers or group IDs
+                message: 'Hello! This is a custom response.'
+            }
+        ];
     }
 };
 ```
 
 - **`envelope`**: Contains the Signal message data, including `source` (sender) and `dataMessage` (content).
 - **`config`**: The bot's current configuration object.
-- **Return Value**: A promise resolving to a response object `{ recipients: string[], message: string }`. If the function returns `null` or `undefined`, no response is sent.
+- **Return Value**: A promise resolving to an array of response objects `{ recipients: string[], message: string }[]`, one per message to send. If the function returns `null` or `undefined`, no response is sent.
 
 ## Running the Bot
 
@@ -111,6 +113,4 @@ For production, it is recommended to use a process manager like **PM2**.
 
 1. Install PM2: `npm install pm2 -g`
 2. Start the bot: `pm2 start bot.js --name signal-bot`
-3. Enable auto-start on reboot: `pm2 startup` and `pm2 save`
-nal-bot`
 3. Enable auto-start on reboot: `pm2 startup` and `pm2 save`

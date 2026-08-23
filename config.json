@@ -1,6 +1,6 @@
 {
     "user": "the-signal-user-number",
-    "module": "javascript-module",
+    "module": "localhandler",
     "permitted": [ "permitted-sender-1", "permitted-sender-2" ],
     "actions": {
 	"xdf": "/usr/bin/df",
