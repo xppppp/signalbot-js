@@ -122,6 +122,48 @@ async function getMessages(config, onMessageReceived, onError, verboseLevel) {
     }
 }
 
+// Sends each Response ({ recipients: [], message: '' }) via signal-cli. When
+// replying inside a group (messageGroupId) everything goes to that group;
+// otherwise a recipient that isn't a phone number is treated as a group ID.
+function sendResponses(responses, messageGroupId, verboseLevel) {
+    if (!responses) {
+        log(3, 'Support handler returned no responses', verboseLevel);
+        return;
+    }
+
+    for (const response of responses) {
+        if (!response.recipients?.length || !response.message) {
+            log(3, 'Response had no recipients or message: ' + JSON.stringify(response), verboseLevel);
+            continue;
+        }
+
+        for (const recipient of response.recipients) {
+            const isNumber = /^\+\d+$/.test(recipient);
+            const target = messageGroupId ? `-g ${messageGroupId}` : (isNumber ? recipient : `-g ${recipient}`);
+            const fullCmd = `${signalCmd} send --message-from-stdin ${target}`;
+
+            try {
+                const child = exec(`/bin/bash -c "${fullCmd}"`);
+
+                // A write to child.stdin failing (e.g. the process exited
+                // immediately) surfaces as an async 'error' event, not a
+                // thrown exception - an unhandled one would crash the whole
+                // bot, so it needs its own listener.
+                child.on('error', (err) => log(1, `Error spawning ${fullCmd}: ${err}`, verboseLevel));
+                child.stdin.on('error', (err) => log(1, `Error piping input to ${fullCmd}: ${err}`, verboseLevel));
+
+                child.stdin.write(response.message);
+                child.stdin.end();
+
+                child.stdout.on('data', (data) => log(2, `send to ${recipient} stdout: ${data}`, verboseLevel));
+                child.stderr.on('data', (data) => log(2, `send to ${recipient} stderr: ${data}`, verboseLevel));
+            } catch (err) {
+                log(1, `Error piping input to ${fullCmd}: ${err}`, verboseLevel);
+            }
+        }
+    }
+}
+
 async function handleMessage(config, envelope, verboseLevel) {
     const message = envelope.dataMessage.message;
     log(3, `Handling message ${message}`, verboseLevel);
@@ -150,41 +192,7 @@ async function handleMessage(config, envelope, verboseLevel) {
         try {
             // The handler returns an array of Response: [{ recipients: [], message: '' }]
             const responses = await config.support.handler(envelope, config);
-
-            if (responses) {
-                for (const response of responses) {
-                    if (response.recipients && response.message) {
-                        for (const recipient of response.recipients) {
-                            const target = messageGroupId ? `-g ${messageGroupId}` : recipient;
-                            const fullCmd = `${signalCmd} send --message-from-stdin ${target}`;
-
-                            try {
-                                const child = exec(`/bin/bash -c "${fullCmd}"`);
-
-                                // A write to child.stdin failing (e.g. the
-                                // process exited immediately) surfaces as an
-                                // async 'error' event, not a thrown
-                                // exception - an unhandled one would crash
-                                // the whole bot, so it needs its own listener.
-                                child.on('error', (err) => log(1, `Error spawning ${fullCmd}: ${err}`, verboseLevel));
-                                child.stdin.on('error', (err) => log(1, `Error piping input to ${fullCmd}: ${err}`, verboseLevel));
-
-                                child.stdin.write(response.message);
-                                child.stdin.end();
-
-                                child.stdout.on('data', (data) => log(2, `send to ${recipient} stdout: ${data}`, verboseLevel));
-                                child.stderr.on('data', (data) => log(2, `send to ${recipient} stderr: ${data}`, verboseLevel));
-                            } catch (err) {
-                                log(1, `Error piping input to ${fullCmd}: ${err}`, verboseLevel);
-                            }
-                        }
-                    } else {
-                        log(3, 'Response had no recipients or message: ' + JSON.stringify(response), verboseLevel);
-                    }
-                }
-            } else {
-                log(3, 'Support handler returned no responses', verboseLevel);
-            }
+            sendResponses(responses, messageGroupId, verboseLevel);
         } catch (err) {
             log(1, `Error in support handler: ${err.message}`, verboseLevel);
         }
@@ -228,6 +236,17 @@ async function runBot(configPath, verboseLevel) {
                 await getMessages(config, (cfg, msg) => dispatchAction(cfg, msg, verboseLevel), handleError, verboseLevel);
             } else {
                 log(1, 'signal user not configured', verboseLevel);
+            }
+
+            // Optional time-driven hook, independent of any incoming message.
+            // Runs after the poll so messages that arrived just before a
+            // deadline are handled first.
+            if (config.support?.tick) {
+                try {
+                    sendResponses(await config.support.tick(config), null, verboseLevel);
+                } catch (err) {
+                    log(1, `Error in support tick: ${err.message}`, verboseLevel);
+                }
             }
 
             if (config.repeat > 0) {

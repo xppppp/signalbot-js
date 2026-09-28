@@ -90,6 +90,9 @@ module.exports = {
 - **`config`**: The bot's current configuration object.
 - **Return Value**: A promise resolving to an array of response objects `{ recipients: string[], message: string }[]`, one per message to send. If the function returns `null` or `undefined`, no response is sent.
 
+### Optional: time-driven `tick`
+A module may also export `async tick(config)`, called once per polling loop (after incoming messages are handled) with no message attached, for work that is due at a point in time rather than in reaction to a message. It returns the same array of responses as `handler`. Since there is no incoming message to reply to, a recipient that is not a phone number (`+123...`) is treated as a group ID; modules typically take their recipients from a config field such as `announce`.
+
 ## Running the Bot
 
 ### Basic Start
